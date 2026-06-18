@@ -1,0 +1,165 @@
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr_diff.txt
+          echo "diff_size=$(wc -l < pr_diff.txt)" >> $GITHUB_OUTPUT
+          echo "PR diff captured: $(wc -l < pr_diff.txt) lines"
+
+      - name: Run AI Code Review via AWS Bedrock
+        id: ai_review
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: us-east-1
+        run: |
+          pip install boto3 -q
+
+          python3 << 'EOF'
+          import boto3
+          import json
+          import os
+          import sys
+
+          # Read the diff
+          with open('pr_diff.txt', 'r') as f:
+              diff_content = f.read()
+
+          if not diff_content.strip():
+              print("No diff found - skipping review")
+              with open('review_output.txt', 'w') as f:
+                  f.write("No code changes detected to review.")
+              sys.exit(0)
+
+          # Truncate if too large (max ~15000 chars for safety)
+          if len(diff_content) > 15000:
+              diff_content = diff_content[:15000] + "\n\n... (diff truncated due to size)"
+
+          # Build the prompt
+          prompt = f"""Review the following Pull Request diff and return a structured code review.
+
+## Pull Request Information
+- Repository: ${{ github.repository }}
+- PR Title: ${{ github.event.pull_request.title }}
+- Author: ${{ github.event.pull_request.user.login }}
+- Source Branch: ${{ github.head_ref }} → ${{ github.base_ref }}
+
+## Code Diff
+```diff
+{diff_content}
+```
+
+## Instructions
+Review this code for:
+1. **Security issues** - hardcoded secrets, SQL injection, missing input validation
+2. **Null handling** - potential NullPointerExceptions, missing null checks
+3. **Code quality** - magic numbers, long methods, poor naming
+4. **Performance** - N+1 queries, string concatenation in loops
+5. **Test coverage** - missing tests for new methods
+
+## Response Format
+Respond in this exact markdown format:
+
+## 🤖 AI Code Review
+
+**Overall Score: X/10**
+
+### Summary
+[2-3 sentence summary of the PR]
+
+### 🔴 Critical Issues
+[List critical issues or "None found"]
+
+### 🟡 Warnings
+[List warnings or "None found"]
+
+### 🟢 Suggestions
+[List suggestions or "None found"]
+
+### Category Scores
+| Category | Score | Notes |
+|----------|-------|-------|
+| Security | X/10 | ... |
+| Null Handling | X/10 | ... |
+| Code Quality | X/10 | ... |
+| Performance | X/10 | ... |
+| Test Coverage | X/10 | ... |
+
+---
+*Reviewed by Claude Sonnet 4.6 via AWS Bedrock*
+"""
+
+          # Call AWS Bedrock
+          bedrock = boto3.client(
+              service_name='bedrock-runtime',
+              region_name='us-east-1'
+          )
+
+          body = json.dumps({
+              "anthropic_version": "bedrock-2023-05-31",
+              "max_tokens": 4096,
+              "temperature": 0.1,
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": prompt
+                  }
+              ]
+          })
+
+          print("Calling AWS Bedrock (Claude Sonnet 4.6)...")
+
+          response = bedrock.invoke_model(
+              modelId="us.anthropic.claude-sonnet-4-6",
+              body=body
+          )
+
+          response_body = json.loads(response['body'].read())
+          review_text = response_body['content'][0]['text']
+
+          print("Review received from Claude!")
+          print(f"Review length: {len(review_text)} characters")
+
+          # Save review to file
+          with open('review_output.txt', 'w') as f:
+              f.write(review_text)
+
+          print("Review saved successfully")
+          EOF
+
+      - name: Post Review Comment on PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read the review
+          REVIEW=$(cat review_output.txt)
+
+          # Post as PR comment using GitHub API
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "$(jq -n --arg body "$REVIEW" '{"body": $body}')"
+
+          echo "Review comment posted on PR #${{ github.event.pull_request.number }}"
+
