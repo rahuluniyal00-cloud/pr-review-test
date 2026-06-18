@@ -18,13 +18,11 @@ jobs:
           fetch-depth: 0
 
       - name: Get PR diff
-        id: diff
         run: |
           git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr_diff.txt
           echo "PR diff captured: $(wc -l < pr_diff.txt) lines"
 
       - name: Run AI Code Review via AWS Bedrock
-        id: ai_review
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -37,105 +35,92 @@ jobs:
           PR_BASE: ${{ github.base_ref }}
         run: |
           pip install boto3 -q
+          cat > review_script.py << 'PYEOF'
+import boto3
+import json
+import os
+import sys
 
-          python3 - << 'PYEOF'
-          import boto3
-          import json
-          import os
-          import sys
+with open('pr_diff.txt', 'r') as f:
+    diff_content = f.read()
 
-          # Read the diff
-          with open('pr_diff.txt', 'r') as f:
-              diff_content = f.read()
+if not diff_content.strip():
+    print("No diff found - skipping review")
+    with open('review_output.txt', 'w') as f:
+        f.write("No code changes detected to review.")
+    sys.exit(0)
 
-          if not diff_content.strip():
-              print("No diff found - skipping review")
-              with open('review_output.txt', 'w') as f:
-                  f.write("No code changes detected to review.")
-              sys.exit(0)
+if len(diff_content) > 15000:
+    diff_content = diff_content[:15000] + "\n\n... (diff truncated due to size)"
 
-          # Truncate if too large
-          if len(diff_content) > 15000:
-              diff_content = diff_content[:15000] + "\n\n... (diff truncated due to size)"
+repo   = os.environ.get('PR_REPO', '')
+title  = os.environ.get('PR_TITLE', '')
+author = os.environ.get('PR_AUTHOR', '')
+head   = os.environ.get('PR_HEAD', '')
+base   = os.environ.get('PR_BASE', '')
 
-          # Get PR info from environment variables
-          repo   = os.environ.get('PR_REPO', '')
-          title  = os.environ.get('PR_TITLE', '')
-          author = os.environ.get('PR_AUTHOR', '')
-          head   = os.environ.get('PR_HEAD', '')
-          base   = os.environ.get('PR_BASE', '')
+prompt = (
+    "Review the following Pull Request diff and return a structured code review.\n\n"
+    "## Pull Request Information\n"
+    "- Repository: " + repo + "\n"
+    "- PR Title: " + title + "\n"
+    "- Author: " + author + "\n"
+    "- Source Branch: " + head + " to " + base + "\n\n"
+    "## Code Diff\n"
+    + diff_content + "\n\n"
+    "## Instructions\n"
+    "Review this code for:\n"
+    "1. Security issues - hardcoded secrets, SQL injection, missing input validation\n"
+    "2. Null handling - potential NullPointerExceptions, missing null checks\n"
+    "3. Code quality - magic numbers, long methods, poor naming\n"
+    "4. Performance - N+1 queries, string concatenation in loops\n"
+    "5. Test coverage - missing tests for new methods\n\n"
+    "## Response Format\n"
+    "## AI Code Review\n\n"
+    "**Overall Score: X/10**\n\n"
+    "### Summary\n"
+    "[2-3 sentence summary]\n\n"
+    "### Critical Issues\n"
+    "[List critical issues or None found]\n\n"
+    "### Warnings\n"
+    "[List warnings or None found]\n\n"
+    "### Suggestions\n"
+    "[List suggestions or None found]\n\n"
+    "### Category Scores\n"
+    "| Category | Score | Notes |\n"
+    "|----------|-------|-------|\n"
+    "| Security | X/10 | ... |\n"
+    "| Null Handling | X/10 | ... |\n"
+    "| Code Quality | X/10 | ... |\n"
+    "| Performance | X/10 | ... |\n"
+    "| Test Coverage | X/10 | ... |\n\n"
+    "---\n"
+    "Reviewed by Claude Sonnet 4.6 via AWS Bedrock"
+)
 
-          # Build the prompt (no backticks inside)
-          prompt = (
-              "Review the following Pull Request diff and return a structured code review.\n\n"
-              "## Pull Request Information\n"
-              f"- Repository: {repo}\n"
-              f"- PR Title: {title}\n"
-              f"- Author: {author}\n"
-              f"- Source Branch: {head} to {base}\n\n"
-              "## Code Diff\n"
-              f"{diff_content}\n\n"
-              "## Instructions\n"
-              "Review this code for:\n"
-              "1. Security issues - hardcoded secrets, SQL injection, missing input validation\n"
-              "2. Null handling - potential NullPointerExceptions, missing null checks\n"
-              "3. Code quality - magic numbers, long methods, poor naming\n"
-              "4. Performance - N+1 queries, string concatenation in loops\n"
-              "5. Test coverage - missing tests for new methods\n\n"
-              "## Response Format\n"
-              "Respond in this exact markdown format:\n\n"
-              "## AI Code Review\n\n"
-              "**Overall Score: X/10**\n\n"
-              "### Summary\n"
-              "[2-3 sentence summary]\n\n"
-              "### Critical Issues\n"
-              "[List critical issues or None found]\n\n"
-              "### Warnings\n"
-              "[List warnings or None found]\n\n"
-              "### Suggestions\n"
-              "[List suggestions or None found]\n\n"
-              "### Category Scores\n"
-              "| Category | Score | Notes |\n"
-              "|----------|-------|-------|\n"
-              "| Security | X/10 | ... |\n"
-              "| Null Handling | X/10 | ... |\n"
-              "| Code Quality | X/10 | ... |\n"
-              "| Performance | X/10 | ... |\n"
-              "| Test Coverage | X/10 | ... |\n\n"
-              "---\n"
-              "Reviewed by Claude Sonnet 4.6 via AWS Bedrock"
-          )
+bedrock = boto3.client(service_name='bedrock-runtime', region_name='us-east-1')
 
-          # Call AWS Bedrock
-          bedrock = boto3.client(
-              service_name='bedrock-runtime',
-              region_name='us-east-1'
-          )
+body = json.dumps({
+    "anthropic_version": "bedrock-2023-05-31",
+    "max_tokens": 4096,
+    "temperature": 0.1,
+    "messages": [{"role": "user", "content": prompt}]
+})
 
-          body = json.dumps({
-              "anthropic_version": "bedrock-2023-05-31",
-              "max_tokens": 4096,
-              "temperature": 0.1,
-              "messages": [{"role": "user", "content": prompt}]
-          })
+print("Calling AWS Bedrock (Claude Sonnet 4.6)...")
 
-          print("Calling AWS Bedrock (Claude Sonnet 4.6)...")
+response = bedrock.invoke_model(modelId="us.anthropic.claude-sonnet-4-6", body=body)
+response_body = json.loads(response['body'].read())
+review_text = response_body['content'][0]['text']
 
-          response = bedrock.invoke_model(
-              modelId="us.anthropic.claude-sonnet-4-6",
-              body=body
-          )
+print("Review received! Length: " + str(len(review_text)) + " characters")
 
-          response_body = json.loads(response['body'].read())
-          review_text = response_body['content'][0]['text']
+with open('review_output.txt', 'w') as f:
+    f.write(review_text)
 
-          print(f"Review received! Length: {len(review_text)} characters")
-
-          with open('review_output.txt', 'w') as f:
-              f.write(review_text)
-
-          print("Done!")
-          PYEOF
+print("Done!")
+PYEOF
+          python3 review_script.py
 
       - name: Post Review Comment on PR
         env:
