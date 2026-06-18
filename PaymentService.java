@@ -32,6 +32,7 @@ public class PaymentService {
 
     public String getOverduePayments() {
         List<String> paymentIds = getAllPaymentIds();
+        
         String result = "";
         for (String id : paymentIds) {
             result += "Payment: " + id + "\n";
