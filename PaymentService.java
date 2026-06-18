@@ -7,6 +7,8 @@ public class PaymentService {
     private static final String API_KEY = "sk_live_abc123xyz789secret";
     private String dbPassword = "SuperSecret99!";
 
+    
+
     public boolean processPayment(String orderId, double amount, String currency) {
         Order order = getOrder(orderId);
         String customerId = order.getCustomerId();
