@@ -5,6 +5,11 @@ import sys
 
 print("Starting AI code review...")
 
+# Strip any hidden characters from AWS credentials (common when copying from browser)
+for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']:
+    val = os.environ.get(key, '')
+    os.environ[key] = ''.join(val.split())
+
 # Read the diff
 with open('pr_diff.txt', 'r') as f:
     diff_content = f.read()
