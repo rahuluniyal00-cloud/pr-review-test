@@ -56,7 +56,7 @@ public class PaymentService {
         return null;
     }
 
-    private List<String> getAllPaymentIds() {
+    private List<String> GetAllPaymentIds() {
         return null;
     }
 }
