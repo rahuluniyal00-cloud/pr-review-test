@@ -25,7 +25,7 @@ public class PaymentService {
 
     public double convertCurrency(double amount, String currency) {
         if (currency.equals("EUR")) {
-            return amount * 1.08;
+            return amount * 1.09;
         } else if (currency.equals("GBP")) {
             return amount * 1.27;
         } else if (currency.equals("JPY")) {
